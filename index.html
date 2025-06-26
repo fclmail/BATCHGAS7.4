@@ -1,0 +1,206 @@
+<!DOCTYPE html>  
+<html lang="en">  
+<head>  
+  <meta charset="UTF-8"/>  
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>  
+  <title>Polygon Arbitrage Bot</title>  
+  <script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js"></script>  
+  <style>  
+    body { font-family: 'Courier New', monospace; background: #000; color: #eee; margin: 1rem; }  
+    table { border-collapse: collapse; width: 100%; margin-top: 1rem; }  
+    th, td { border: 1px solid #444; padding: 0.5rem; text-align: center; }  
+    tr.profitable { background-color: #0f0; } /* Bright green for profitable rows */  
+    button { cursor: pointer; }  
+    input[type=number] { width: 6rem; font-family: monospace; font-size: 1rem; color: #eee; background: #222; border: 1px solid #444; padding: 0.2rem 0.4rem; }  
+    label { margin-right: 1rem; }  
+    #log { background: #111; padding: 0.5rem; border: 1px solid #444; height: 150px; overflow: auto; font-size: 0.9rem; margin-top: 1rem; }  
+    #walletBalance, #contractBalance, #accumulatedProfit { margin-top: 1rem; }  
+  </style>  
+</head>  
+<body>  
+
+<h2>Polygon Arbitrage Bot</h2>  
+<div id="walletBalance">Wallet Balance: $0</div>  
+<div id="contractBalance">Contract Balance: $0</div>  
+<div id="accumulatedProfit">Accumulated Profit: $0</div>  
+
+<button id="connectWallet">Connect Wallet</button>  
+<button id="scanNow">Scan Now</button>  
+
+<label>Min Profit % <input id="minProfitPct" type="number" value="0.5" step="0.01"></label>  
+<label>Trade Amount (USDC) <input id="tradeAmount" type="number" value="10" step="0.01"></label>  
+<label>Slippage % <input id="slippagePct" type="number" value="0.5" step="0.01"></label>  
+<label>Scan Interval (sec) <input id="scanInterval" type="number" value="30" step="1"></label>  
+<label>Batch Size <input id="batchSize" type="number" value="1" min="1" max="100" step="1"></label>  
+
+<label><input id="autoTradeToggle" type="checkbox" checked> Auto Trade</label>  
+<label><input id="backgroundTradeToggle" type="checkbox"> Background Trade</label>  
+
+<table>  
+  <thead>  
+    <tr>  
+      <th>Token</th><th>Buy Router</th><th>Sell Router</th><th>Buy Price</th><th>Sell Price</th>  
+      <th>Profit (USDC)</th><th>Profit %</th><th>Status</th><th class="net-profit">Net Profit</th><th>Time</th><th>Action</th>  
+    </tr>  
+  </thead>  
+  <tbody id="results"></tbody>  
+</table>  
+
+<div id="log"></div>  
+
+<script>  
+const contractAddress = "0x98FA2A393Bf5C297FE29E160B244b560a61d9976"; // Replace with your contract address  
+const contractABI = []; // Add your contract ABI here  
+const usdcAddress = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";  
+const tokens = {  
+  WETH: "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",  
+  USDT: "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",  
+  UNI: "0xb33EaAd8d922B1083446DC23f610c2567fB5180f"  
+};  
+
+const routers = {  
+  QuickSwap: "0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff",  
+  SushiSwap: "0x1b02da8cb0d097eb8d57a175b88c7d8b47997506",  
+  Dfyn: "0xA8b607Aa09B6A2641cF6F90f643E76d3f6e6Ff73",  
+  CafeSwap: "0x9055682E58C74fc8DdBFC55Ad2428aB1F96098Fc",  
+  Balancer: "0x056Fd409E1d7A124BD7017459dFEa2F387b6d5Cd",  
+  JetSwap: "0x5C6EC38fb0e2609672BDf628B1fD605A523E5923",  
+  KyberElastic: "0xF9c2b5746c946EF883ab2660BbbB1f10A5bdeAb4",  
+  SushiX: "0xd08b5f3e89f1e2d6b067e0a0cbdb094e6e41e77c",  
+  ApeSwap: "0xC0788A3aD43d79aa53B09c2EaCc313A787d1d607"  
+};  
+
+let provider, signer, contract, walletAddress, scanIntervalId, accumulatedProfit = 0;  
+
+document.getElementById("connectWallet").onclick = connectWallet;  
+document.getElementById("scanNow").onclick = scanAndArbitrage;  
+
+async function connectWallet() {  
+  provider = new ethers.providers.Web3Provider(window.ethereum);  
+  await provider.send("eth_requestAccounts", []);  
+
+  // Get the wallet address after connecting  
+  signer = provider.getSigner();  
+  walletAddress = await signer.getAddress();  
+  contract = new ethers.Contract(contractAddress, contractABI, signer);  
+  log("✅ Wallet connected: " + walletAddress);  
+  updateBalances();  
+  startAutoScan();  
+}  
+
+function startAutoScan() {  
+  const sec = parseInt(document.getElementById("scanInterval").value);  
+  if (scanIntervalId) clearInterval(scanIntervalId);  
+  scanIntervalId = setInterval(() => { scanAndArbitrage(); }, sec * 1000);  
+  log("🕒 Auto scan started: every " + sec + "s");  
+}  
+
+async function updateBalances() {  
+  const walletBalance = await provider.getBalance(walletAddress);  
+  const contractBalance = await provider.getBalance(contractAddress);  
+  
+  const usdcBalance = await getBalance(usdcAddress, walletAddress); // Assume you have a method to get token balances  
+  document.getElementById("walletBalance").innerText = `Wallet Balance: $${ethers.utils.formatUnits(usdcBalance, 6)}`;  
+  document.getElementById("contractBalance").innerText = `Contract Balance: $${ethers.utils.formatUnits(contractBalance, 18)}`;  
+  document.getElementById("accumulatedProfit").innerText = `Accumulated Profit: $${accumulatedProfit.toFixed(2)}`;  
+}  
+
+async function getBalance(tokenAddress, userAddress) {  
+  const tokenContract = new ethers.Contract(tokenAddress, ["function balanceOf(address) view returns (uint256)"], provider);  
+  return await tokenContract.balanceOf(userAddress);  
+}  
+
+async function scanAndArbitrage() {  
+  const minPct = parseFloat(document.getElementById("minProfitPct").value);  
+  const tradeAmt = parseFloat(document.getElementById("tradeAmount").value);  
+  const slip = parseFloat(document.getElementById("slippagePct").value);  
+  const amountIn = ethers.utils.parseUnits(tradeAmt.toString(), 6);  
+  document.getElementById("results").innerHTML = "";  
+
+  for (const [symbol, token] of Object.entries(tokens)) {  
+    for (const [buyName, buyRouter] of Object.entries(routers)) {  
+      for (const [sellName, sellRouter] of Object.entries(routers)) {  
+        if (buyName === sellName) continue; // Skip if buy and sell routers are the same  
+        try {  
+          const buyOut = await getAmountOut(buyRouter, [usdcAddress, token], amountIn);  
+          const sellOut = await getAmountOut(sellRouter, [token, usdcAddress], buyOut);  
+          const received = parseFloat(ethers.utils.formatUnits(sellOut, 6));  
+          const profit = received - tradeAmt;  
+          const pct = (profit / tradeAmt) * 100;  
+          const adjPct = pct * (1 - slip / 100);  
+
+          const row = document.createElement("tr");  
+          if (adjPct > minPct) row.classList.add("profitable");  
+
+          let status = "❌ Skip";  
+          if (adjPct > minPct && profit > 0) {  
+            status = "🟢 Confirmed";   
+            accumulatedProfit += profit; // Update accumulated profit  
+          } else if (adjPct > minPct) {  
+            status = "🚨 Arbitrage";   
+          }  
+
+          row.innerHTML = `  
+            <td>${symbol}</td><td>${buyName}</td><td>${sellName}</td>  
+            <td>${(tradeAmt / parseFloat(ethers.utils.formatUnits(buyOut, 18))).toFixed(6)}</td>  
+            <td>${received.toFixed(6)}</td>  
+            <td>${profit.toFixed(6)}</td>  
+            <td>${adjPct.toFixed(2)}%</td>  
+            <td>${status}</td>  
+            <td class="net-profit">-</td><td>-</td>  
+            <td><button onclick="handleTrade('${buyRouter}', '${sellRouter}', '${token}')">Trade</button></td>  
+          `;  
+          document.getElementById("results").appendChild(row);  
+
+          // Auto trade logic  
+          if (adjPct > minPct && document.getElementById("autoTradeToggle").checked) {  
+            await handleTrade(buyRouter, sellRouter, token);  
+          }  
+        } catch (e) {  
+          log(`⚠️ ${symbol} ${buyName}→${sellName}: ${e.message}`);  
+        }  
+      }  
+    }  
+  }  
+  updateBalances(); // Update balances after scanning  
+}  
+
+async function handleTrade(bRouter, sRouter, token) {  
+  const amountIn = ethers.utils.parseUnits(document.getElementById("tradeAmount").value, 6);  
+  const gas = 1000000;  
+  const tx = await contract.executeFlashLoan(amountIn, bRouter, sRouter, token, { gasLimit: gas });  
+  log("🚀 Tx sent: " + tx.hash);  
+  await tx.wait();  
+  log("✅ Trade confirmed");  
+  updateBalances(); // Update balances after trade  
+}  
+
+async function getAmountOut(router, path, amt) {  
+  const r = new ethers.Contract(router, ["function getAmountsOut(uint256,address[]) view returns(uint256[])"], provider);  
+  const amounts = await r.getAmountsOut(amt, path);  
+  return amounts[1];  
+}  
+
+function log(msg) {  
+  const div = document.getElementById("log");  
+  div.innerHTML = `[${new Date().toLocaleTimeString()}] ${msg}<br>` + div.innerHTML;  
+}  
+
+// Automatically load the wallet if already connected  
+window.addEventListener("load", async () => {  
+  if (window.ethereum) {  
+    const accounts = await window.ethereum.request({ method: 'eth_accounts' });  
+    if (accounts.length > 0) {  
+      log("🔄 Reconnected wallet: " + accounts[0]);  
+      await connectWallet();  
+    } else {  
+      log("⏳ Wallet not yet connected. Click 'Connect Wallet'.");  
+    }  
+  } else {  
+    log("❌ MetaMask not found.");  
+  }  
+});  
+
+</script>  
+</body>  
+</html>
